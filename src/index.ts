@@ -16,8 +16,13 @@ function handleTermination(bot?: Client) {
     process.exit(0);
 }
 
+async function getYoutubeDlVersion() {
+    const { stdout } = await util.promisify(childProcess.exec)('youtube-dl --version');
+    return stdout.trim();
+}
+
 async function main() {
-    const { stdout: youtubeDlVersion } = await util.promisify(childProcess.exec)('youtube-dl --version');
+    const youtubeDlVersion = await getYoutubeDlVersion();
     console.log(`youtube-dl ${youtubeDlVersion}`);
 
     const bot = new Client(token!, {});
@@ -30,8 +35,17 @@ async function main() {
         const myId = bot.user.id;
         const mentions = [`<@${myId}>`, `<@!${myId}>`];
         const content = msg.content;
-        const splitContent = content.split(' ');
+        const splitContent = content.split(' ').filter(x => x !== '');
         if (splitContent.length !== 2 || mentions.indexOf(splitContent[0]) === -1) {
+            return;
+        }
+
+        if (splitContent[1] === '버전') {
+            await bot.createMessage(
+                msg.channel.id,
+                '버전 `dev`\n\n' +
+                `\`youtube-dl\` ${youtubeDlVersion}`
+            );
             return;
         }
 
