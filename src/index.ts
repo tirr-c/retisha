@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import { IncomingMessage } from 'http';
 import * as https from 'https';
 import * as path from 'path';
+import { URL } from 'url';
 import * as util from 'util';
 
 import { Client, Message, TextChannel, VoiceConnection } from 'eris';
@@ -71,14 +72,20 @@ async function runQueue(bot: Client) {
                     const id = `${item.type}-${item.musicId}`;
                     const { stdout } =
                         await util.promisify(childProcess.exec)(`youtube-dl -xg https://youtu.be/${item.musicId}`);
-                    const url = stdout.split('\n')[0].trim();
-                    const res = await new Promise<IncomingMessage>(resolve => {
-                        https.get(url, {}, resolve);
-                    });
-                    if (res.statusCode === 200) {
-                        stream = res;
-                    } else {
-                        console.error(`Request failed with status code ${res.statusCode}\nURL: ${url}`);
+                    let url = stdout.split('\n')[0].trim();
+                    while (true) {
+                        const res = await new Promise<IncomingMessage>(resolve => {
+                            https.get(url, {}, resolve);
+                        });
+                        if (res.statusCode === 200) {
+                            stream = res;
+                        } else if (res.statusCode === 302) {
+                            url = new URL(res.headers['location']!, url).toString();
+                            continue;
+                        } else {
+                            console.error(`Request failed with status code ${res.statusCode}\nURL: ${url}`);
+                        }
+                        break;
                     }
                 }
                 if (stream == null) {
