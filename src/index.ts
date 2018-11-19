@@ -1,9 +1,11 @@
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
+import { IncomingMessage } from 'http';
+import * as https from 'https';
 import * as path from 'path';
 import * as util from 'util';
 
-import { Client, Message, TextChannel } from 'eris';
+import { Client, Message, TextChannel, VoiceConnection } from 'eris';
 
 const token = process.env['BOT_TOKEN'];
 if (token == null) {
@@ -21,11 +23,116 @@ async function getYoutubeDlVersion() {
     return stdout.trim();
 }
 
+interface MusicInfo {
+    textChannelId: string;
+    voiceChannelId: string;
+    type: string;
+    musicId: string;
+    title: string;
+}
+
+let enqueue: (list: MusicInfo[]) => void = () => {};
+let cancelPlaying: () => void = () => {};
+async function runQueue(bot: Client) {
+    const queue: MusicInfo[] = [];
+    let stop = false;
+    while (!stop) {
+        try {
+            const musicList = await new Promise<MusicInfo[]>(resolve => {
+                enqueue = resolve;
+            });
+            enqueue = item => {
+                console.log(item);
+                queue.push(...item);
+            };
+            queue.push(...musicList);
+
+            while (queue.length > 0) {
+                const item = queue.shift()!;
+
+                let connection: VoiceConnection;
+                try {
+                    connection = await bot.joinVoiceChannel(item.voiceChannelId, { opusOnly: true });
+                } catch (err) {
+                    await bot.createMessage(
+                        item.textChannelId,
+                        ':x: 음성 채널에 들어갈 수 없어요.',
+                    );
+                    return;
+                }
+
+                const loadingMessage = await bot.createMessage(
+                    item.textChannelId,
+                    `:hourglass: 다음 곡(**${item.title}**) 준비하고 있어요...`,
+                );
+
+                let stream;
+                if (item.type === 'youtube') {
+                    const id = `${item.type}-${item.musicId}`;
+                    const { stdout } =
+                        await util.promisify(childProcess.exec)(`youtube-dl -xg https://youtu.be/${item.musicId}`);
+                    const url = stdout.split('\n')[0].trim();
+                    const res = await new Promise<IncomingMessage>(resolve => {
+                        https.get(url, {}, resolve);
+                    });
+                    if (res.statusCode === 200) {
+                        stream = res;
+                    } else {
+                        console.error(`Request failed with status code ${res.statusCode}\nURL: ${url}`);
+                    }
+                }
+                if (stream == null) {
+                    continue;
+                }
+
+                const ffmpegHandle = childProcess.spawn(
+                    'ffmpeg -i - -vn -f webm -c:a libopus -b:a 96k -',
+                    [],
+                    { shell: true, stdio: ['pipe', 'pipe', 'inherit'] },
+                );
+                ffmpegHandle.on('error', console.error);
+                stream.pipe(ffmpegHandle.stdin);
+
+                if (connection.playing) {
+                    connection.removeAllListeners('end');
+                    connection.stopPlaying();
+                }
+
+                await loadingMessage.edit(`:notes: **${item.title}**`);
+
+                connection.play(ffmpegHandle.stdout, {
+                    format: 'webm',
+                });
+                const waitingCancelPromise = new Promise(resolve => {
+                    cancelPlaying = resolve;
+                }).then(() => {
+                    connection.removeAllListeners('end');
+                    connection.stopPlaying();
+                });
+                const waitingEndPromise = new Promise((resolve, reject) => {
+                    connection.once('end', () => {
+                        // bot.leaveVoiceChannel(voiceChannelId);
+                        resolve();
+                    });
+                });
+                await Promise.race([waitingCancelPromise, waitingEndPromise]);
+                console.error('done playing');
+                cancelPlaying = () => {};
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+    enqueue = () => {};
+    cancelPlaying = () => {};
+}
+
 async function main() {
     const youtubeDlVersion = await getYoutubeDlVersion();
     console.log(`youtube-dl ${youtubeDlVersion}`);
 
     const bot = new Client(token!, {});
+    runQueue(bot);
 
     bot.on('messageCreate', async msg => {
         if (msg.member == null) {
@@ -52,10 +159,16 @@ async function main() {
         // URL tests
         const url = new URL(splitContent[1]);
         let id = undefined;
+        let isPlaylist = false;
         if (url.host === 'youtu.be') {
             id = url.pathname.substr(1);
-        } else if (/^(:?www\.|music\.)?youtube.com$/.test(url.host) && url.pathname === '/watch') {
-            id = url.searchParams.get('v');
+        } else if (/^(:?www\.|m\.|music\.)?youtube.com$/.test(url.host)) {
+            if (url.pathname === '/watch') {
+                id = url.searchParams.get('v');
+            } else if (url.pathname === '/playlist') {
+                id = url.searchParams.get('list');
+                isPlaylist = true;
+            }
         }
         if (id == null) {
             return;
@@ -72,41 +185,50 @@ async function main() {
 
         await msg.channel.sendTyping();
 
-        const { stdout: audioUrlRaw } = await util.promisify(childProcess.exec)(`youtube-dl -xg '${url.toString()}'`);
-        const audioUrlList = audioUrlRaw.split('\n').filter(x => x !== '');
-        if (audioUrlList.length === 0) {
+        const musicList = [];
+        if (isPlaylist) {
+            const { stdout } = await util.promisify(childProcess.exec)(
+                `youtube-dl --playlist-random --flat-playlist -J 'https://youtube.com/playlist?list=${id}'`,
+            );
+            const playlistInfo = JSON.parse(stdout);
+            for (const entry of playlistInfo.entries) {
+                musicList.push({
+                    textChannelId: msg.channel.id,
+                    voiceChannelId,
+                    type: 'youtube',
+                    musicId: entry.id,
+                    title: entry.title,
+                });
+            }
+        } else {
+            const { stdout } = await util.promisify(childProcess.exec)(
+                `youtube-dl -e 'https://youtu.be/${id}'`,
+            );
+            const title = stdout.trim();
+            if (title !== '') {
+                musicList.push({
+                    textChannelId: msg.channel.id,
+                    voiceChannelId,
+                    type: 'youtube',
+                    musicId: id,
+                    title,
+                });
+            }
+        }
+
+        if (musicList.length === 0) {
             await bot.createMessage(
                 msg.channel.id,
                 ':x: 재생할 수 있는 음악이 없어요.',
             );
             return;
         }
-        const audioUrl = audioUrlList[0];
-
-        let connection;
-        try {
-            connection = await bot.joinVoiceChannel(voiceChannelId);
-        } catch (err) {
-            await bot.createMessage(
-                msg.channel.id,
-                ':x: 음성 채널에 들어갈 수 없어요.',
-            );
-            return;
-        }
-
-        if (connection.playing) {
-            connection.removeAllListeners('end');
-            connection.stopPlaying();
-        }
 
         await bot.createMessage(
             msg.channel.id,
-            ':notes: 리퀘스트, 접수했어요!',
+            ':ok: 리퀘스트, 접수했어요!',
         );
-        connection.play(audioUrl);
-        connection.once('end', () => {
-            bot.leaveVoiceChannel(voiceChannelId);
-        });
+        enqueue(musicList);
     });
 
     bot.connect();
