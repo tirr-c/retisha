@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import { IncomingMessage } from 'http';
 import * as https from 'https';
 import * as path from 'path';
+import { Readable } from 'stream';
 import { URL } from 'url';
 import * as util from 'util';
 
@@ -61,13 +62,14 @@ async function runQueue(bot: Client) {
                     );
                     return;
                 }
+                connection.on('error', console.error);
 
                 const loadingMessage = await bot.createMessage(
                     item.textChannelId,
                     `:hourglass: 다음 곡(**${item.title}**) 준비하고 있어요...`,
                 );
 
-                let stream;
+                let stream: Readable | undefined = undefined;
                 if (item.type === 'youtube') {
                     const id = `${item.type}-${item.musicId}`;
                     const { stdout } =
@@ -91,6 +93,7 @@ async function runQueue(bot: Client) {
                 if (stream == null) {
                     continue;
                 }
+                stream.on('error', console.error);
 
                 const ffmpegHandle = childProcess.spawn(
                     'ffmpeg -i - -vn -f webm -c:a libopus -b:a 96k -',
@@ -113,6 +116,9 @@ async function runQueue(bot: Client) {
                 const waitingCancelPromise = new Promise<boolean>(resolve => {
                     cancelPlaying = resolve;
                 }).then(clearAll => {
+                    if (stream != null) {
+                        stream.unpipe(ffmpegHandle.stdin);
+                    }
                     connection.removeAllListeners('end');
                     connection.stopPlaying();
                     if (clearAll) {
@@ -126,7 +132,6 @@ async function runQueue(bot: Client) {
                     });
                 });
                 await Promise.race([waitingCancelPromise, waitingEndPromise]);
-                console.error('done playing');
                 cancelPlaying = () => {};
             }
         } catch (err) {
