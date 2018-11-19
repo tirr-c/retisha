@@ -32,9 +32,9 @@ interface MusicInfo {
 }
 
 let enqueue: (list: MusicInfo[]) => void = () => {};
-let cancelPlaying: () => void = () => {};
+let cancelPlaying: (clearAll: boolean) => void = () => {};
 async function runQueue(bot: Client) {
-    const queue: MusicInfo[] = [];
+    let queue: MusicInfo[] = [];
     let stop = false;
     while (!stop) {
         try {
@@ -103,11 +103,14 @@ async function runQueue(bot: Client) {
                 connection.play(ffmpegHandle.stdout, {
                     format: 'webm',
                 });
-                const waitingCancelPromise = new Promise(resolve => {
+                const waitingCancelPromise = new Promise<boolean>(resolve => {
                     cancelPlaying = resolve;
-                }).then(() => {
+                }).then(clearAll => {
                     connection.removeAllListeners('end');
                     connection.stopPlaying();
+                    if (clearAll) {
+                        queue = [];
+                    }
                 });
                 const waitingEndPromise = new Promise((resolve, reject) => {
                     connection.once('end', () => {
@@ -153,6 +156,12 @@ async function main() {
                 '버전 `dev`\n\n' +
                 `\`youtube-dl\` ${youtubeDlVersion}`
             );
+            return;
+        } else if (splitContent[1] === '다음') {
+            cancelPlaying(false);
+            return;
+        } else if (splitContent[1] === '정지') {
+            cancelPlaying(true);
             return;
         }
 
