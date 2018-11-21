@@ -41,7 +41,7 @@ interface YoutubeMusic {
     type: 'youtube';
     id: string;
     title: string;
-    url: string;
+    url?: string;
 }
 
 interface FileMusic {
@@ -56,16 +56,24 @@ type MusicMetadata = YoutubeMusic | FileMusic;
 type MusicInfo = ChannelInfo & MusicMetadata;
 
 async function downloadMusic(info: MusicMetadata) {
-    const id = `${info.type}-${info.id}`;
-    const music = path.join(musicPath, id + '.webm');
+    const uniqueId = `${info.type}-${info.id}`;
+    const music = path.join(musicPath, uniqueId + '.webm');
     try {
         await util.promisify(fs.access)(music, fs.constants.R_OK);
         return;
     } catch (_) {
     }
     if (info.type === 'youtube') {
+        let url = info.url;
+        if (url == null) {
+            const { stdout } = await util.promisify(childProcess.exec)(
+                `youtube-dl -xJ 'https://youtu.be/${info.id}'`,
+            );
+            const entry = JSON.parse(stdout);
+            url = entry.url;
+        }
         await util.promisify(childProcess.exec)(
-            `ffmpeg -i '${info.url}' -vn -af loudnorm -c:a libopus -b:a 96k '${music}'`
+            `ffmpeg -i '${url}' -vn -af loudnorm -c:a libopus -b:a 96k '${music}'`
         );
     } else {
         throw new Error(`Unknown type ${info.type}`);
@@ -175,6 +183,7 @@ async function main() {
     const bot = new Client(token!, {});
     runQueue(bot);
 
+    let downloadPromiseChain = Promise.resolve(true);
     bot.on('messageCreate', async msg => {
         if (msg.member == null) {
             return;
@@ -232,24 +241,17 @@ async function main() {
 
         await msg.channel.sendTyping();
 
-        const musicList = [];
+        const musicMetadataList = [];
         if (isPlaylist) {
             const { stdout } = await util.promisify(childProcess.exec)(
                 `youtube-dl --playlist-random --flat-playlist -xJ 'https://youtube.com/playlist?list=${id}'`,
             );
             const playlistInfo = JSON.parse(stdout);
             for (const entry of playlistInfo.entries) {
-                const meta = {
+                musicMetadataList.push({
                     type: 'youtube' as 'youtube',
                     id: String(entry.id),
                     title: String(entry.title),
-                    url: String(entry.url),
-                };
-                musicList.push({
-                    textChannelId: msg.channel.id,
-                    voiceChannelId,
-                    downloadPromise: downloadMusic(meta).then(() => true).catch(err => { console.error(err); return false; }),
-                    ...meta,
                 });
             }
         } else {
@@ -258,19 +260,33 @@ async function main() {
             );
             const entry = JSON.parse(stdout);
             if (entry.title != null) {
-                const meta = {
+                musicMetadataList.push({
                     type: 'youtube' as 'youtube',
                     id: String(entry.id),
                     title: String(entry.title),
                     url: String(entry.url),
-                };
-                musicList.push({
-                    textChannelId: msg.channel.id,
-                    voiceChannelId,
-                    downloadPromise: downloadMusic(meta).then(() => true).catch(err => { console.error(err); return false; }),
-                    ...meta,
                 });
             }
+        }
+
+        const musicList = [];
+        for (const metadata of musicMetadataList) {
+            const nextPromise = downloadPromiseChain
+                .then(async () => {
+                    await downloadMusic(metadata);
+                    return true;
+                }).catch(err => {
+                    console.error(err);
+                    return false;
+                });
+            downloadPromiseChain = nextPromise;
+
+            musicList.push({
+                textChannelId: msg.channel.id,
+                voiceChannelId,
+                downloadPromise: nextPromise,
+                ...metadata,
+            });
         }
 
         if (musicList.length === 0) {
