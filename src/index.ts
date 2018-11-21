@@ -9,6 +9,8 @@ import * as util from 'util';
 
 import { Client, Message, TextChannel, VoiceConnection } from 'eris';
 
+import { musicPath } from './path';
+
 const token = process.env['BOT_TOKEN'];
 if (token == null) {
     console.error('BOT_TOKEN not set.');
@@ -25,6 +27,10 @@ async function getYoutubeDlVersion() {
     return stdout.trim();
 }
 
+async function initializeFileSystem() {
+    await util.promisify(fs.mkdir)(musicPath, { recursive: true });
+}
+
 interface MusicInfo {
     textChannelId: string;
     voiceChannelId: string;
@@ -39,19 +45,20 @@ async function runQueue(bot: Client) {
     let queue: MusicInfo[] = [];
     let stop = false;
     while (!stop) {
-        try {
-            const musicList = await new Promise<MusicInfo[]>(resolve => {
-                enqueue = resolve;
-            });
-            enqueue = item => {
-                console.log(item);
-                queue.push(...item);
-            };
-            queue.push(...musicList);
+        const musicList = await new Promise<MusicInfo[]>(resolve => {
+            enqueue = resolve;
+        });
+        enqueue = item => {
+            console.log(item);
+            queue.push(...item);
+        };
+        queue.push(...musicList);
+        while (queue.length > 0) {
+            let informationMessage;
+            let message: string;
+            const item = queue.shift()!;
 
-            while (queue.length > 0) {
-                const item = queue.shift()!;
-
+            try {
                 let connection: VoiceConnection;
                 try {
                     connection = await bot.joinVoiceChannel(item.voiceChannelId, { opusOnly: true });
@@ -64,61 +71,46 @@ async function runQueue(bot: Client) {
                 }
                 connection.on('error', console.error);
 
-                const loadingMessage = await bot.createMessage(
-                    item.textChannelId,
-                    `:hourglass: 다음 곡(**${item.title}**) 준비하고 있어요...`,
-                );
-
-                let stream: Readable | undefined = undefined;
-                if (item.type === 'youtube') {
-                    const id = `${item.type}-${item.musicId}`;
-                    const { stdout } =
-                        await util.promisify(childProcess.exec)(`youtube-dl -xg https://youtu.be/${item.musicId}`);
-                    let url = stdout.split('\n')[0].trim();
-                    while (true) {
-                        const res = await new Promise<IncomingMessage>(resolve => {
-                            https.get(url, {}, resolve);
-                        });
-                        if (res.statusCode === 200) {
-                            stream = res;
-                        } else if (res.statusCode === 302) {
-                            url = new URL(res.headers['location']!, url).toString();
-                            continue;
-                        } else {
-                            console.error(`Request failed with status code ${res.statusCode}\nURL: ${url}`);
-                        }
-                        break;
+                const id = `${item.type}-${item.musicId}`;
+                const music = path.join(musicPath, id + '.webm');
+                try {
+                    await util.promisify(fs.access)(music, fs.constants.R_OK);
+                } catch (_) {
+                    informationMessage = await bot.createMessage(
+                        item.textChannelId,
+                        `:hourglass: **${item.title}** 다운로드 중입니다...`,
+                    );
+                    if (item.type === 'youtube') {
+                        const { stdout } =
+                            await util.promisify(childProcess.exec)(`youtube-dl -xg https://youtu.be/${item.musicId}`);
+                        let url = stdout.split('\n')[0].trim();
+                        await util.promisify(childProcess.exec)(
+                            `ffmpeg -i '${url}' -vn -c:a libopus -b:a 96k '${music}'`
+                        );
+                    } else {
+                        throw new Error(`Unknown type ${item.type}`);
                     }
                 }
-                if (stream == null) {
-                    continue;
-                }
-                stream.on('error', console.error);
-
-                const ffmpegHandle = childProcess.spawn(
-                    'ffmpeg -i - -vn -f webm -c:a libopus -b:a 96k -',
-                    [],
-                    { shell: true, stdio: ['pipe', 'pipe', 'inherit'] },
-                );
-                ffmpegHandle.on('error', console.error);
-                stream.pipe(ffmpegHandle.stdin);
 
                 if (connection.playing) {
                     connection.removeAllListeners('end');
                     connection.stopPlaying();
                 }
 
-                await loadingMessage.edit(`:notes: **${item.title}**`);
+                message = `:notes: **${item.title}**`;
+                if (informationMessage != null) {
+                    await informationMessage.edit(message);
+                } else {
+                    informationMessage = await bot.createMessage(
+                        item.textChannelId,
+                        message,
+                    );
+                }
 
-                connection.play(ffmpegHandle.stdout, {
-                    format: 'webm',
-                });
+                connection.play(music, { format: 'webm' });
                 const waitingCancelPromise = new Promise<boolean>(resolve => {
                     cancelPlaying = resolve;
                 }).then(clearAll => {
-                    if (stream != null) {
-                        stream.unpipe(ffmpegHandle.stdin);
-                    }
                     connection.removeAllListeners('end');
                     connection.stopPlaying();
                     if (clearAll) {
@@ -132,10 +124,19 @@ async function runQueue(bot: Client) {
                     });
                 });
                 await Promise.race([waitingCancelPromise, waitingEndPromise]);
-                cancelPlaying = () => {};
+            } catch (err) {
+                console.error(err);
+                message = `:dizzy_face: ${item.title} 재생 실패...`;
+                if (informationMessage != null) {
+                    await informationMessage.edit(message);
+                } else {
+                    informationMessage = await bot.createMessage(
+                        item.textChannelId,
+                        message,
+                    );
+                }
             }
-        } catch (err) {
-            console.error(err);
+            cancelPlaying = () => {};
         }
     }
     enqueue = () => {};
@@ -143,6 +144,8 @@ async function runQueue(bot: Client) {
 }
 
 async function main() {
+    await initializeFileSystem();
+
     const youtubeDlVersion = await getYoutubeDlVersion();
     console.log(`youtube-dl ${youtubeDlVersion}`);
 
