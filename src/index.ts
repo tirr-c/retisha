@@ -49,7 +49,6 @@ async function runQueue(bot: Client) {
             enqueue = resolve;
         });
         enqueue = item => {
-            console.log(item);
             queue.push(...item);
         };
         queue.push(...musicList);
