@@ -31,12 +31,45 @@ async function initializeFileSystem() {
     await util.promisify(fs.mkdir)(musicPath, { recursive: true });
 }
 
-interface MusicInfo {
+interface ChannelInfo {
     textChannelId: string;
     voiceChannelId: string;
-    type: string;
-    musicId: string;
+    downloadPromise: Promise<boolean>;
+}
+
+interface YoutubeMusic {
+    type: 'youtube';
+    id: string;
     title: string;
+    url: string;
+}
+
+interface FileMusic {
+    type: 'file';
+    id: string;
+    title: string;
+    data: Buffer;
+}
+
+type MusicMetadata = YoutubeMusic | FileMusic;
+
+type MusicInfo = ChannelInfo & MusicMetadata;
+
+async function downloadMusic(info: MusicMetadata) {
+    const id = `${info.type}-${info.id}`;
+    const music = path.join(musicPath, id + '.webm');
+    try {
+        await util.promisify(fs.access)(music, fs.constants.R_OK);
+        return;
+    } catch (_) {
+    }
+    if (info.type === 'youtube') {
+        await util.promisify(childProcess.exec)(
+            `ffmpeg -i '${info.url}' -vn -af loudnorm -c:a libopus -b:a 96k '${music}'`
+        );
+    } else {
+        throw new Error(`Unknown type ${info.type}`);
+    }
 }
 
 let enqueue: (list: MusicInfo[]) => void = () => {};
@@ -70,7 +103,7 @@ async function runQueue(bot: Client) {
                 }
                 connection.on('error', console.error);
 
-                const id = `${item.type}-${item.musicId}`;
+                const id = `${item.type}-${item.id}`;
                 const music = path.join(musicPath, id + '.webm');
                 try {
                     await util.promisify(fs.access)(music, fs.constants.R_OK);
@@ -79,16 +112,7 @@ async function runQueue(bot: Client) {
                         item.textChannelId,
                         `:hourglass: **${item.title}** 다운로드 중입니다...`,
                     );
-                    if (item.type === 'youtube') {
-                        const { stdout } =
-                            await util.promisify(childProcess.exec)(`youtube-dl -xg https://youtu.be/${item.musicId}`);
-                        let url = stdout.split('\n')[0].trim();
-                        await util.promisify(childProcess.exec)(
-                            `ffmpeg -i '${url}' -vn -c:a libopus -b:a 96k '${music}'`
-                        );
-                    } else {
-                        throw new Error(`Unknown type ${item.type}`);
-                    }
+                    await item.downloadPromise;
                 }
 
                 if (connection.playing) {
@@ -211,30 +235,40 @@ async function main() {
         const musicList = [];
         if (isPlaylist) {
             const { stdout } = await util.promisify(childProcess.exec)(
-                `youtube-dl --playlist-random --flat-playlist -J 'https://youtube.com/playlist?list=${id}'`,
+                `youtube-dl --playlist-random --flat-playlist -xJ 'https://youtube.com/playlist?list=${id}'`,
             );
             const playlistInfo = JSON.parse(stdout);
             for (const entry of playlistInfo.entries) {
+                const meta = {
+                    type: 'youtube' as 'youtube',
+                    id: String(entry.id),
+                    title: String(entry.title),
+                    url: String(entry.url),
+                };
                 musicList.push({
                     textChannelId: msg.channel.id,
                     voiceChannelId,
-                    type: 'youtube',
-                    musicId: entry.id,
-                    title: entry.title,
+                    downloadPromise: downloadMusic(meta).then(() => true).catch(err => { console.error(err); return false; }),
+                    ...meta,
                 });
             }
         } else {
             const { stdout } = await util.promisify(childProcess.exec)(
-                `youtube-dl -e 'https://youtu.be/${id}'`,
+                `youtube-dl -xJ 'https://youtu.be/${id}'`,
             );
-            const title = stdout.trim();
-            if (title !== '') {
+            const entry = JSON.parse(stdout);
+            if (entry.title != null) {
+                const meta = {
+                    type: 'youtube' as 'youtube',
+                    id: String(entry.id),
+                    title: String(entry.title),
+                    url: String(entry.url),
+                };
                 musicList.push({
                     textChannelId: msg.channel.id,
                     voiceChannelId,
-                    type: 'youtube',
-                    musicId: id,
-                    title,
+                    downloadPromise: downloadMusic(meta).then(() => true).catch(err => { console.error(err); return false; }),
+                    ...meta,
                 });
             }
         }
