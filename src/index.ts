@@ -9,7 +9,13 @@ import * as util from 'util';
 
 import { Client, Message, TextChannel, VoiceConnection } from 'eris';
 
-import { musicPath } from './path';
+import { musicPath, sshKeyPath } from './path';
+
+const workerHost = process.env['WORKER_HOST'] || '';
+if (workerHost === '') {
+    console.error('WORKER_HOST not set.');
+    process.exit(1);
+}
 
 const token = process.env['BOT_TOKEN'];
 if (token == null) {
@@ -72,9 +78,21 @@ async function downloadMusic(info: MusicMetadata) {
             const entry = JSON.parse(stdout);
             url = entry.url;
         }
-        await util.promisify(childProcess.exec)(
-            `ffmpeg -i '${url}' -vn -af loudnorm -c:a libopus -b:a 96k '${music}'`
+        const outStream = fs.createWriteStream(music);
+        const handle = childProcess.spawn(
+            '/usr/bin/ssh',
+            [
+                '-q',
+                '-i', sshKeyPath,
+                workerHost,
+                `./run '${url}'`,
+            ],
+            {
+                stdio: ['ignore', 'pipe', 'ignore'],
+            },
         );
+        outStream.on('error', console.error);
+        handle.stdout.pipe(outStream);
     } else {
         throw new Error(`Unknown type ${info.type}`);
     }
