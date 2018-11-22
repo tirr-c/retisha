@@ -78,21 +78,24 @@ async function downloadMusic(info: MusicMetadata) {
             const entry = JSON.parse(stdout);
             url = entry.url;
         }
-        const outStream = fs.createWriteStream(music);
-        const handle = childProcess.spawn(
-            '/usr/bin/ssh',
-            [
-                '-q',
-                '-i', sshKeyPath,
-                workerHost,
-                `./run '${url}'`,
-            ],
-            {
-                stdio: ['ignore', 'pipe', 'inherit'],
-            },
-        );
-        outStream.on('error', console.error);
-        handle.stdout.pipe(outStream);
+        await new Promise((resolve, reject) => {
+            const outStream = fs.createWriteStream(music);
+            const handle = childProcess.spawn(
+                '/usr/bin/ssh',
+                [
+                    '-q',
+                    '-i', sshKeyPath,
+                    workerHost,
+                    `./run '${url}'`,
+                ],
+                {
+                    stdio: ['ignore', 'pipe', 'inherit'],
+                },
+            );
+            handle.on('error', reject);
+            outStream.on('error', reject);
+            handle.stdout.pipe(outStream).on('finish', resolve);
+        });
     } else {
         throw new Error(`Unknown type ${info.type}`);
     }
