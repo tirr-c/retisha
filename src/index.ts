@@ -137,15 +137,11 @@ async function runQueue(bot: Client) {
 
                 const id = `${item.type}-${item.id}`;
                 const music = path.join(musicPath, id + '.webm');
-                try {
-                    await util.promisify(fs.access)(music, fs.constants.R_OK);
-                } catch (_) {
-                    informationMessage = await bot.createMessage(
-                        item.textChannelId,
-                        `:hourglass: **${item.title}** 다운로드 중입니다...`,
-                    );
-                    await item.downloadPromise;
-                }
+                informationMessage = await bot.createMessage(
+                    item.textChannelId,
+                    `:hourglass: **${item.title}** 준비 중입니다...`,
+                );
+                await item.downloadPromise;
 
                 if (connection.playing) {
                     connection.removeAllListeners('end');
