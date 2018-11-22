@@ -11,6 +11,7 @@ ENV RETISHA_HOME /var/lib/retisha
 RUN apk add --no-cache ca-certificates \
                        ffmpeg \
                        openssl \
+                       openssh-client \
                        python3 \
  && pip3 install youtube-dl
 COPY package.json /app/package.json
