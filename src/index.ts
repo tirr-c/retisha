@@ -88,7 +88,7 @@ async function downloadMusic(info: MusicMetadata) {
                 `./run '${url}'`,
             ],
             {
-                stdio: ['ignore', 'pipe', 'ignore'],
+                stdio: ['ignore', 'pipe', 'inherit'],
             },
         );
         outStream.on('error', console.error);
