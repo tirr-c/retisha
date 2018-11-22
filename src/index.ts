@@ -35,6 +35,10 @@ async function getYoutubeDlVersion() {
 
 async function initializeFileSystem() {
     await util.promisify(fs.mkdir)(musicPath, { recursive: true });
+
+    const domain = /[^@]+$/.exec(workerHost)![0];
+    await util.promisify(fs.mkdir)(path.join(process.env['HOME'] || '', '.ssh'), { recursive: true });
+    await util.promisify(childProcess.exec)(`ssh-keyscan -H ${domain} > ~/.ssh/known_hosts`);
 }
 
 interface ChannelInfo {
@@ -130,7 +134,6 @@ async function runQueue(bot: Client) {
                     );
                     return;
                 }
-                connection.on('error', console.error);
 
                 const id = `${item.type}-${item.id}`;
                 const music = path.join(musicPath, id + '.webm');
