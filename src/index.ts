@@ -54,14 +54,14 @@ interface YoutubeMusic {
     url?: string;
 }
 
-interface FileMusic {
-    type: 'file';
+interface AttachmentMusic {
+    type: 'discord';
     id: string;
     title: string;
-    data: Buffer;
+    url: string;
 }
 
-type MusicMetadata = YoutubeMusic | FileMusic;
+type MusicMetadata = YoutubeMusic | AttachmentMusic;
 
 type MusicInfo = ChannelInfo & MusicMetadata;
 
@@ -100,8 +100,28 @@ async function downloadMusic(info: MusicMetadata) {
             outStream.on('error', reject);
             handle.stdout.pipe(outStream).on('finish', resolve);
         });
+    } else if (info.type === 'discord') {
+        const url = info.url;
+        await new Promise((resolve, reject) => {
+            const outStream = fs.createWriteStream(music);
+            const handle = childProcess.spawn(
+                '/usr/bin/ssh',
+                [
+                    '-q',
+                    '-i', sshKeyPath,
+                    workerHost,
+                    `./run '${url}'`,
+                ],
+                {
+                    stdio: ['ignore', 'pipe', 'inherit'],
+                },
+            );
+            handle.on('error', reject);
+            outStream.on('error', reject);
+            handle.stdout.pipe(outStream).on('finish', resolve);
+        });
     } else {
-        throw new Error(`Unknown type ${info.type}`);
+        ((_: never) => { throw new Error(`Unknown type ${(info as any).type}`); })(info);
     }
 }
 
@@ -194,6 +214,38 @@ async function runQueue(bot: Client) {
     cancelPlaying = () => {};
 }
 
+async function metadataForYoutube(id: string, isPlaylist: boolean): Promise<MusicMetadata[]> {
+    const musicMetadataList = [];
+    if (isPlaylist) {
+        const { stdout } = await util.promisify(childProcess.exec)(
+            `youtube-dl --playlist-random --flat-playlist -xJ 'https://youtube.com/playlist?list=${id}'`,
+        );
+        const playlistInfo = JSON.parse(stdout);
+        for (const entry of playlistInfo.entries) {
+            musicMetadataList.push({
+                type: 'youtube' as 'youtube',
+                id: String(entry.id),
+                title: String(entry.title),
+            });
+        }
+    } else {
+        const { stdout } = await util.promisify(childProcess.exec)(
+            `youtube-dl -xJ 'https://youtu.be/${id}'`,
+        );
+        const entry = JSON.parse(stdout);
+        if (entry.title != null) {
+            musicMetadataList.push({
+                type: 'youtube' as 'youtube',
+                id: String(entry.id),
+                title: String(entry.title),
+                url: String(entry.url),
+            });
+        }
+    }
+
+    return musicMetadataList;
+}
+
 async function main() {
     await initializeFileSystem();
 
@@ -213,7 +265,8 @@ async function main() {
         const mentions = [`<@${myId}>`, `<@!${myId}>`];
         const content = msg.content;
         const splitContent = content.split(' ').filter(x => x !== '');
-        if (splitContent.length !== 2 || mentions.indexOf(splitContent[0]) === -1) {
+        const hasAttachments = msg.attachments && msg.attachments.length > 0
+        if (!hasAttachments && (splitContent.length !== 2 || mentions.indexOf(splitContent[0]) === -1)) {
             return;
         }
 
@@ -232,24 +285,6 @@ async function main() {
             return;
         }
 
-        // URL tests
-        const url = new URL(splitContent[1]);
-        let id = undefined;
-        let isPlaylist = false;
-        if (url.host === 'youtu.be') {
-            id = url.pathname.substr(1);
-        } else if (/^(:?www\.|m\.|music\.)?youtube.com$/.test(url.host)) {
-            if (url.pathname === '/watch') {
-                id = url.searchParams.get('v');
-            } else if (url.pathname === '/playlist') {
-                id = url.searchParams.get('list');
-                isPlaylist = true;
-            }
-        }
-        if (id == null) {
-            return;
-        }
-
         const voiceChannelId = msg.member.voiceState.channelID;
         if (voiceChannelId == null) {
             await bot.createMessage(
@@ -259,34 +294,50 @@ async function main() {
             return;
         }
 
-        await msg.channel.sendTyping();
-
-        const musicMetadataList = [];
-        if (isPlaylist) {
-            const { stdout } = await util.promisify(childProcess.exec)(
-                `youtube-dl --playlist-random --flat-playlist -xJ 'https://youtube.com/playlist?list=${id}'`,
+        let musicMetadataList;
+        if (hasAttachments) {
+            musicMetadataList = msg.attachments.map(attachment => {
+                const id = attachment.id;
+                const title = path.parse(attachment.filename).name;
+                const url = attachment.url;
+                return {
+                    type: 'discord' as 'discord',
+                    id,
+                    title,
+                    url,
+                };
+            });
+            const metadataMessage = musicMetadataList.map(metadata => `${metadata.id} ${metadata.title}`).join('\n');
+            await bot.createMessage(
+                msg.channel.id,
+                metadataMessage,
             );
-            const playlistInfo = JSON.parse(stdout);
-            for (const entry of playlistInfo.entries) {
-                musicMetadataList.push({
-                    type: 'youtube' as 'youtube',
-                    id: String(entry.id),
-                    title: String(entry.title),
-                });
-            }
         } else {
-            const { stdout } = await util.promisify(childProcess.exec)(
-                `youtube-dl -xJ 'https://youtu.be/${id}'`,
-            );
-            const entry = JSON.parse(stdout);
-            if (entry.title != null) {
-                musicMetadataList.push({
-                    type: 'youtube' as 'youtube',
-                    id: String(entry.id),
-                    title: String(entry.title),
-                    url: String(entry.url),
-                });
+            // URL tests
+            let url;
+            try {
+                url = new URL(splitContent[1]);
+            } catch (_) {
+                return;
             }
+            let id = undefined;
+            let isPlaylist = false;
+            if (url.host === 'youtu.be') {
+                id = url.pathname.substr(1);
+            } else if (/^(:?www\.|m\.|music\.)?youtube.com$/.test(url.host)) {
+                if (url.pathname === '/watch') {
+                    id = url.searchParams.get('v');
+                } else if (url.pathname === '/playlist') {
+                    id = url.searchParams.get('list');
+                    isPlaylist = true;
+                }
+            }
+            if (id == null) {
+                return;
+            }
+
+            await msg.channel.sendTyping();
+            musicMetadataList = await metadataForYoutube(id, isPlaylist);
         }
 
         const musicList = [];
