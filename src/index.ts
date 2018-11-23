@@ -58,7 +58,7 @@ interface AttachmentMusic {
     type: 'discord';
     id: string;
     title: string;
-    url: string;
+    url?: string;
 }
 
 type MusicMetadata = YoutubeMusic | AttachmentMusic;
@@ -102,6 +102,9 @@ async function downloadMusic(info: MusicMetadata) {
         });
     } else if (info.type === 'discord') {
         const url = info.url;
+        if (url == null) {
+            throw new Error(`Attachment ID not found: ${info.id}`);
+        }
         await new Promise((resolve, reject) => {
             const outStream = fs.createWriteStream(music);
             const handle = childProcess.spawn(
@@ -296,9 +299,11 @@ async function main() {
 
         let musicMetadataList;
         if (hasAttachments) {
-            musicMetadataList = msg.attachments.map(attachment => {
+            const firstTitle = splitContent.slice(1).join(' ').trim();
+            musicMetadataList = msg.attachments.map((attachment, idx) => {
+                const useFileTitle = idx !== 0 || firstTitle === '';
                 const id = attachment.id;
-                const title = path.parse(attachment.filename).name;
+                const title = useFileTitle ? path.parse(attachment.filename).name : firstTitle;
                 const url = attachment.url;
                 return {
                     type: 'discord' as 'discord',
@@ -312,6 +317,20 @@ async function main() {
                 msg.channel.id,
                 metadataMessage,
             );
+        } else if (/^\d+$/.test(splitContent[1])) {
+            const id = splitContent[1];
+            const filename = `discord-${id}.webm`;
+            const music = path.join(musicPath, filename);
+            try {
+                await util.promisify(fs.access)(music, fs.constants.R_OK);
+                musicMetadataList = [{
+                    type: 'discord' as 'discord',
+                    id,
+                    title: splitContent.slice(2).join('') || id,
+                }];
+            } catch (_) {
+                musicMetadataList = [] as MusicMetadata[];
+            }
         } else {
             // URL tests
             let url;
