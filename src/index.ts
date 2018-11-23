@@ -269,7 +269,7 @@ async function main() {
         const content = msg.content;
         const splitContent = content.split(' ').filter(x => x !== '');
         const hasAttachments = msg.attachments && msg.attachments.length > 0
-        if (!hasAttachments && (splitContent.length !== 2 || mentions.indexOf(splitContent[0]) === -1)) {
+        if (!hasAttachments && mentions.indexOf(splitContent[0]) === -1) {
             return;
         }
 
