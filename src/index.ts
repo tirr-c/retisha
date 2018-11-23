@@ -326,7 +326,7 @@ async function main() {
                 musicMetadataList = [{
                     type: 'discord' as 'discord',
                     id,
-                    title: splitContent.slice(2).join('') || id,
+                    title: splitContent.slice(2).join(' ') || id,
                 }];
             } catch (_) {
                 musicMetadataList = [] as MusicMetadata[];
